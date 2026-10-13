@@ -23,82 +23,115 @@
  *  2024-01-29     | 1.0       | Versión inicial del script con extracción básica de eventos.
  *  2024-01-30     | 1.1       | Se agregaron encabezados en la hoja de cálculo y mejoras en el formato.
  *  2024-01-31     | 1.2       | Se incluyó control de cambios y mejoras en la estructura del código.
+ *  2026-10-13     | 2.0       | Refactor a Web App "Gtoolbox": doGet, funciones especializadas y módulo Reporte de Actividades.
  *  --------------------------------------------------------------
  */
 
-function exportEventsToSheet() {
-  try {
-    // Obtener la dirección de correo electrónico del usuario
-    const userEmail = Session.getActiveUser().getEmail();
+/**
+ * Punto de entrada de la Web App Gtoolbox.
+ * @param {Object} e Parámetros del evento GET.
+ * @return {HtmlOutput}
+ */
+function doGet(e) {
+  return HtmlService.createHtmlOutputFromFile('index')
+    .setTitle('Gtoolbox')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
 
-    // Obtener el calendario del usuario
-    const calendar = CalendarApp.getDefaultCalendar();
-    const calendarName = calendar.getName();
+/**
+ * Extrae eventos del calendario predeterminado entre dos fechas (inclusive).
+ * @param {string} startDateStr Fecha inicio 'yyyy-MM-dd'.
+ * @param {string} endDateStr Fecha fin 'yyyy-MM-dd'.
+ * @return {{calendarName: string, start: Date, end: Date, events: Object[]}}
+ */
+function getCalendarEvents_(startDateStr, endDateStr) {
+  const start = parseDate_(startDateStr);
+  const end = parseDate_(endDateStr);
+  if (!start || !end) throw new Error('Fechas inválidas.');
+  if (start > end) throw new Error('La fecha de inicio no puede ser posterior a la fecha de fin.');
+  end.setHours(23, 59, 59, 999);
 
-    // Definir el rango de tiempo: desde 120 días atrás hasta hoy
-    const now = new Date();
-    const pastDate = new Date();
-    pastDate.setDate(now.getDate() - 2 );
+  const calendar = CalendarApp.getDefaultCalendar();
+  const tz = Session.getScriptTimeZone();
+  const events = calendar.getEvents(start, end).map(function (event) {
+    return {
+      titulo: event.getTitle(),
+      inicio: Utilities.formatDate(event.getStartTime(), tz, "yyyy-MM-dd HH:mm:ss"),
+      fin: Utilities.formatDate(event.getEndTime(), tz, "yyyy-MM-dd HH:mm:ss"),
+      ubicacion: event.getLocation() || 'Sin ubicación',
+      descripcion: event.getDescription() || 'Sin descripción',
+      id: event.getId()
+    };
+  });
+  return { calendarName: calendar.getName(), start: start, end: end, events: events };
+}
 
-    // Obtener eventos en el rango de fechas
-    const events = calendar.getEvents(pastDate, now);
+/**
+ * Crea un Google Sheet en la raíz de Drive con los eventos.
+ * @param {Object[]} events Eventos serializables.
+ * @param {string} calendarName Nombre del calendario.
+ * @param {string} startDateStr Fecha inicio.
+ * @param {string} endDateStr Fecha fin.
+ * @return {{url: string, fileName: string}}
+ */
+function createSheet_(events, calendarName, startDateStr, endDateStr) {
+  const tz = Session.getScriptTimeZone();
+  const userEmail = Session.getActiveUser().getEmail();
+  const timestamp = Utilities.formatDate(new Date(), tz, 'yyyyMMdd_HHmmss');
+  const fileName = userEmail + '_' + timestamp;
+  const ss = SpreadsheetApp.create(fileName);
+  const sheet = ss.getActiveSheet();
+  sheet.setName(Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd'));
 
-    // Crear un nuevo archivo de Google Sheets en la raíz de Google Drive
-    const timestamp = Utilities.formatDate(now, Session.getScriptTimeZone(), "yyyyMMdd_HHmmss");
-    const fileName = `${userEmail}_${timestamp}`;
-    const sheet = SpreadsheetApp.create(fileName);
-    const sheetId = sheet.getId();
+  const rows = [['Título', 'Inicio', 'Fin', 'Ubicación', 'Descripción', 'ID del Evento']];
+  events.forEach(function (ev) {
+    rows.push([ev.titulo, ev.inicio, ev.fin, ev.ubicacion, ev.descripcion, ev.id]);
+  });
+  sheet.getRange(1, 1, rows.length, rows[0].length).setValues(rows);
+  sheet.getRange(1, 1, 1, rows[0].length).setFontWeight('bold');
 
-    // Obtener la hoja activa y cambiar su nombre a la fecha de extracción
-    const activeSheet = sheet.getActiveSheet();
-    activeSheet.setName(Utilities.formatDate(now, Session.getScriptTimeZone(), "yyyy-MM-dd"));
+  const legendRow = sheet.getLastRow() + 3;
+  sheet.getRange(legendRow, 1).setValue('Datos extraídos del calendario: ' + calendarName);
+  sheet.getRange(legendRow + 1, 1).setValue('Rango de fechas: ' + startDateStr + ' a ' + endDateStr);
+  return { url: ss.getUrl(), fileName: fileName };
+}
 
-    // Agregar encabezados a la hoja
-    const headers = ["Título", "Inicio", "Fin", "Ubicación", "Descripción", "ID del Evento"];
-    activeSheet.appendRow(headers);
+/**
+ * Envía el correo de notificación al usuario.
+ * @param {string} fileName Nombre del archivo.
+ * @param {string} fileUrl URL del Sheet.
+ */
+function sendReportEmail_(fileName, fileUrl) {
+  MailApp.sendEmail({
+    to: Session.getActiveUser().getEmail(),
+    subject: 'Extracción de Eventos Completada',
+    body: 'La extracción de eventos se ha completado exitosamente.\n\n📂 Archivo: ' + fileName +
+      '\n📍 Ubicación: Raíz de Google Drive\n🔗 Accede aquí: ' + fileUrl
+  });
+}
 
-    // Agregar eventos a la hoja de cálculo
-    events.forEach(event => {
-      activeSheet.appendRow([
-        event.getTitle(),
-        event.getStartTime(),
-        event.getEndTime(),
-        event.getLocation() || "Sin ubicación",
-        event.getDescription() || "Sin descripción",
-        event.getId()
-      ]);
-    });
+/**
+ * Función invocada desde el frontend (google.script.run).
+ * Extrae eventos, crea el Sheet, envía el correo y devuelve los eventos.
+ * @param {string} startDateStr 'yyyy-MM-dd'.
+ * @param {string} endDateStr 'yyyy-MM-dd'.
+ * @return {{events: Object[], sheetUrl: string, fileName: string, calendarName: string}}
+ */
+function generateActivityReport(startDateStr, endDateStr) {
+  const data = getCalendarEvents_(startDateStr, endDateStr);
+  const sheet = createSheet_(data.events, data.calendarName, startDateStr, endDateStr);
+  sendReportEmail_(sheet.fileName, sheet.url);
+  return {
+    events: data.events,
+    sheetUrl: sheet.url,
+    fileName: sheet.fileName,
+    calendarName: data.calendarName
+  };
+}
 
-    // Agregar una leyenda al final de la tabla
-    const lastRow = activeSheet.getLastRow() + 3;
-    activeSheet.getRange(lastRow, 1).setValue(`Datos extraídos del calendario: ${calendarName}`);
-    activeSheet.getRange(lastRow + 1, 1).setValue(`Rango de fechas: ${Utilities.formatDate(pastDate, Session.getScriptTimeZone(), "yyyy-MM-dd")} a ${Utilities.formatDate(now, Session.getScriptTimeZone(), "yyyy-MM-dd")}`);
-
-    // Obtener la URL del archivo creado
-    const fileUrl = sheet.getUrl();
-
-    // Notificar éxito en la ejecución
-    Logger.log(`Extracción completada exitosamente.`);
-    Logger.log(`Nombre del archivo: ${fileName}`);
-    Logger.log(`Ubicación: Raíz de Google Drive`);
-    Logger.log(`Enlace de acceso: ${fileUrl}`);
-
-    // Notificación por correo en lugar de alert()
-    MailApp.sendEmail({
-      to: userEmail,
-      subject: "Extracción de Eventos Completada",
-      body: `La extracción de eventos se ha completado exitosamente.\n\n📂 Archivo: ${fileName}\n📍 Ubicación: Raíz de Google Drive\n🔗 Accede aquí: ${fileUrl}`
-    });
-
-  } catch (error) {
-    // Capturar y mostrar errores en caso de fallo
-    Logger.log(`Error: ${error.message}`);
-
-    // Enviar error por correo
-    MailApp.sendEmail({
-      to: Session.getActiveUser().getEmail(),
-      subject: "Error en la Extracción de Eventos",
-      body: `Ocurrió un error al extraer eventos del calendario.\n\n❌ Error: ${error.message}`
-    });
-  }
+/** Convierte 'yyyy-MM-dd' en Date local; devuelve null si es inválida. */
+function parseDate_(str) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(str || '');
+  if (!m) return null;
+  return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 0, 0, 0, 0);
 }
