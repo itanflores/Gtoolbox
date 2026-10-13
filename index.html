@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gtoolbox</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body { background: #f4f6fb; }
+    .navbar-brand { font-weight: 700; letter-spacing: .5px; }
+    .card { border: 0; border-radius: 1rem; box-shadow: 0 4px 20px rgba(0,0,0,.06); }
+  </style>
+</head>
+<body>
+  <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+    <div class="container">
+      <a class="navbar-brand" href="#">🧰 Gtoolbox</a>
+      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#nav">
+        <span class="navbar-toggler-icon"></span>
+      </button>
+      <div class="collapse navbar-collapse" id="nav">
+        <ul class="navbar-nav me-auto">
+          <li class="nav-item"><a class="nav-link active" aria-current="page" href="#">Reporte de Actividades</a></li>
+        </ul>
+      </div>
+    </div>
+  </nav>
+
+  <main class="container my-4">
+    <section id="reporte-actividades" class="card p-4">
+      <h1 class="h4 mb-1">Reporte de Actividades</h1>
+      <p class="text-muted">Extrae eventos de tu calendario predeterminado en un rango de fechas.</p>
+
+      <div class="row g-3 align-items-end">
+        <div class="col-md-4">
+          <label for="startDate" class="form-label">Fecha de Inicio</label>
+          <input type="date" id="startDate" class="form-control">
+        </div>
+        <div class="col-md-4">
+          <label for="endDate" class="form-label">Fecha de Fin</label>
+          <input type="date" id="endDate" class="form-control">
+        </div>
+        <div class="col-md-4">
+          <button id="btnGenerate" class="btn btn-primary w-100" type="button">Generar Reporte Sheet y Correo</button>
+        </div>
+      </div>
+
+      <div class="d-flex gap-2 mt-3">
+        <button id="btnCsv" class="btn btn-outline-success" type="button" disabled>Descargar CSV</button>
+        <button id="btnJson" class="btn btn-outline-secondary" type="button" disabled>Descargar JSON</button>
+      </div>
+
+      <div id="status" class="mt-3" role="status"></div>
+    </section>
+  </main>
+
+  <script>
+    (function () {
+      var lastReport = null;
+      var $ = function (id) { return document.getElementById(id); };
+
+      // Valores por defecto: últimos 2 días hasta hoy
+      var today = new Date();
+      var past = new Date();
+      past.setDate(today.getDate() - 2);
+      $('startDate').value = toIso(past);
+      $('endDate').value = toIso(today);
+
+      function toIso(d) {
+        var m = ('0' + (d.getMonth() + 1)).slice(-2);
+        var day = ('0' + d.getDate()).slice(-2);
+        return d.getFullYear() + '-' + m + '-' + day;
+      }
+
+      function showStatus(type, html) {
+        $('status').innerHTML = '<div class="alert alert-' + type + ' mb-0">' + html + '</div>';
+      }
+
+      function escapeHtml(s) {
+        var div = document.createElement('div');
+        div.textContent = s;
+        return div.innerHTML;
+      }
+
+      function setDownloads(enabled) {
+        $('btnCsv').disabled = !enabled;
+        $('btnJson').disabled = !enabled;
+      }
+
+      $('btnGenerate').addEventListener('click', function () {
+        var start = $('startDate').value;
+        var end = $('endDate').value;
+        if (!start || !end) { showStatus('warning', 'Selecciona ambas fechas.'); return; }
+        if (start > end) { showStatus('warning', 'La fecha de inicio no puede ser posterior a la de fin.'); return; }
+
+        var btn = $('btnGenerate');
+        btn.disabled = true;
+        setDownloads(false);
+        lastReport = null;
+        showStatus('info', 'Generando reporte…');
+
+        google.script.run
+          .withSuccessHandler(function (res) {
+            btn.disabled = false;
+            lastReport = res;
+            setDownloads(true);
+            showStatus('success', 'Se extrajeron <b>' + res.events.length + '</b> eventos. ' +
+              '<a href="' + escapeHtml(res.sheetUrl) + '" target="_blank" rel="noopener">Abrir Sheet</a>. Correo enviado.');
+          })
+          .withFailureHandler(function (err) {
+            btn.disabled = false;
+            showStatus('danger', 'Error: ' + escapeHtml(err && err.message ? err.message : String(err)));
+          })
+          .generateActivityReport(start, end);
+      });
+
+      function downloadBlob(content, mime, filename) {
+        var blob = new Blob([content], { type: mime });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+      }
+
+      function csvCell(v) {
+        var s = String(v == null ? '' : v);
+        return '"' + s.replace(/"/g, '""') + '"';
+      }
+
+      function buildCsv(events) {
+        var headers = ['Título', 'Inicio', 'Fin', 'Ubicación', 'Descripción', 'ID del Evento'];
+        var lines = [headers.map(csvCell).join(',')];
+        events.forEach(function (e) {
+          lines.push([e.titulo, e.inicio, e.fin, e.ubicacion, e.descripcion, e.id].map(csvCell).join(','));
+        });
+        return lines.join('\r\n');
+      }
+
+      function baseName() {
+        return 'eventos_' + $('startDate').value + '_a_' + $('endDate').value;
+      }
+
+      $('btnCsv').addEventListener('click', function () {
+        if (!lastReport) return;
+        // BOM para que Excel interprete UTF-8
+        downloadBlob('\uFEFF' + buildCsv(lastReport.events), 'text/csv;charset=utf-8;', baseName() + '.csv');
+      });
+
+      $('btnJson').addEventListener('click', function () {
+        if (!lastReport) return;
+        downloadBlob(JSON.stringify(lastReport.events, null, 2), 'application/json;charset=utf-8;', baseName() + '.json');
+      });
+    })();
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
